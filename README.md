@@ -74,6 +74,7 @@ If not set, the proxy accepts all requests without authentication.
 | `glm-5-turbo` | `zai_glm-5-turbo` | Yes | Faster, more economical |
 | `deepseek-v4-pro` | `zai_auto` | Yes | DeepSeek Pro variant |
 | `deepseek-v4` | `zai_auto` | Yes | DeepSeek base variant |
+| `auto` | `zai_auto` | Yes | Auto mode (free during promo period) |
 
 **Note:** All models support native tool calling. DeepSeek models stream function arguments more granularly.
 

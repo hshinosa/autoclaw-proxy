@@ -41,6 +41,7 @@ MODEL_MAP = {
     "glm-5-turbo": "zai_glm-5-turbo",
     "deepseek-v4-pro": "zai_auto",
     "deepseek-v4": "zai_auto",
+    "auto": "zai_auto",
 }
 
 # Account pool with health tracking
