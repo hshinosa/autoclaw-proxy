@@ -2,20 +2,69 @@ version: '3.8'
 
 services:
   autoclaw-proxy:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: autoclaw-proxy
+    image: autoclaw-proxy:latest
+    
+    # Port mapping
     ports:
       - "8070:8070"
+    
+    # Volume mounts
     volumes:
-      - ./autoclaw_accounts.json:/app/autoclaw_accounts.json
-    env_file:
-      - .env
-    restart: unless-stopped
+      # Account credentials (read-write for token updates)
+      - ./autoclaw_accounts.json:/app/autoclaw_accounts.json:rw
+      # Logs directory (optional)
+      - ./logs:/app/logs:rw
+    
+    # Environment variables
     environment:
       - PYTHONUNBUFFERED=1
+      - API_KEY=${API_KEY:-}
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8070/health').raise_for_status()"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8070/health', timeout=5).raise_for_status()"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 10s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Read-only root filesystem (except mounted volumes)
+    read_only: false  # Set to true if you don't need to write to container fs
+    
+    # Network
+    networks:
+      - autoclaw-network
+
+# Network definition
+networks:
+  autoclaw-network:
+    driver: bridge
+    name: autoclaw-network
