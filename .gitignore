@@ -1,0 +1,16 @@
+# Sensitive data
+autoclaw_accounts.json
+accesstoken.txt
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
