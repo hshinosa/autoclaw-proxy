@@ -23,6 +23,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - API_KEY=${API_KEY:-}
+      - ROUTING_STRATEGY=${ROUTING_STRATEGY:-sticky}
     
     # Resource limits (adjust based on your needs)
     deploy:

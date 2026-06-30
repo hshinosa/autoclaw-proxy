@@ -35,6 +35,7 @@ TOKEN_REFRESH_INTERVAL = 3600
 
 DEFAULT_MODEL = "glm-5.2"
 VALID_API_KEY = os.getenv("API_KEY")
+ROUTING_STRATEGY = os.getenv("ROUTING_STRATEGY", "sticky")
 
 MODEL_MAP = {
     "glm-5.2": "openrouter_glm-5.2",
@@ -161,6 +162,35 @@ def get_next_account():
         return account
 
 
+def get_session_hash(session_id):
+    """Consistent hash for session-based routing"""
+    return int(hashlib.md5(session_id.encode()).hexdigest(), 16)
+
+
+def get_account_for_session(session_id):
+    """Get account for session (sticky routing)"""
+    with pool_lock:
+        healthy = [acc for acc in accounts_pool if acc["healthy"]]
+        if not healthy:
+            return None
+
+        idx = get_session_hash(session_id) % len(healthy)
+        account = healthy[idx]
+        account["last_used"] = time.time()
+        return account
+
+
+def get_account_for_request(headers):
+    """Smart account selection based on ROUTING_STRATEGY"""
+    if ROUTING_STRATEGY == "sticky":
+        session_id = headers.get("Authorization") or headers.get(
+            "X-Session-ID", "default"
+        )
+        return get_account_for_session(session_id)
+    else:
+        return get_next_account()
+
+
 def mark_account_failed(account):
     """Mark account as failed"""
     with pool_lock:
@@ -248,8 +278,7 @@ def chat_completions():
             data.get("model", DEFAULT_MODEL), data.get("model", DEFAULT_MODEL)
         )
 
-        # Get account
-        account = get_next_account()
+        account = get_account_for_request(request.headers)
         if not account:
             return jsonify(
                 {
