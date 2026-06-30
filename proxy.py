@@ -401,14 +401,52 @@ def chat_completions():
                     }
                 )
             else:
-                # Stream response
+                # Stream response with proper SSE format
                 def generate():
+                    done_sent = False
                     for line in resp.iter_lines():
                         if line:
-                            yield line + b"\n"
+                            line_str = (
+                                line.decode("utf-8")
+                                if isinstance(line, bytes)
+                                else line
+                            )
+
+                            # Skip if we already sent [DONE]
+                            if done_sent:
+                                break
+
+                            # Check if line is already SSE formatted
+                            if not line_str.startswith("data: "):
+                                # Raw JSON or marker - add SSE prefix
+                                if line_str == "[DONE]":
+                                    yield b"data: [DONE]\n\n"
+                                    done_sent = True
+                                    break
+                                else:
+                                    # Validate it's JSON before sending
+                                    try:
+                                        json.loads(line_str)  # Validate
+                                        yield f"data: {line_str}\n\n".encode("utf-8")
+                                    except json.JSONDecodeError:
+                                        continue  # Skip invalid JSON
+                            else:
+                                # Already formatted, check for [DONE]
+                                if "data: [DONE]" in line_str:
+                                    yield line + b"\n\n"
+                                    done_sent = True
+                                    break
+                                else:
+                                    yield line + b"\n\n"
+
+                    # Ensure we always send [DONE] at the end
+                    if not done_sent:
+                        yield b"data: [DONE]\n\n"
 
                 return Response(
-                    stream_with_context(generate()), content_type="text/event-stream"
+                    stream_with_context(generate()),
+                    content_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
 
         except Exception as e:
