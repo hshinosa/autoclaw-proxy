@@ -225,6 +225,83 @@ def refresh_account_token(account):
     return False
 
 
+def mark_account_depleted(account):
+    """Mark account as depleted (insufficient balance)"""
+    with pool_lock:
+        account["balance"] = 0
+        account["healthy"] = False
+        account["fail_count"] = 3
+    save_accounts()
+    print(f"[WARN] Account {account['email']} depleted (insufficient balance)")
+
+
+def update_account_balance(account, usage_data):
+    """Update account balance based on usage/cost from response"""
+    if not usage_data:
+        return
+
+    cost = usage_data.get("cost", 0)
+    if cost > 0:
+        points_used = int(cost * 10000)
+        with pool_lock:
+            old_balance = account.get("balance", 0)
+            account["balance"] = max(0, old_balance - points_used)
+
+            if account["balance"] < 100:
+                account["healthy"] = False
+                print(
+                    f"[WARN] Account {account['email']} low balance: {account['balance']}"
+                )
+
+        save_accounts()
+
+
+def refresh_account_balance_from_api(account):
+    """Query real balance from AutoClaw API"""
+    try:
+        url = f"{BASE_URL}/agent-assetmgr/api/v2/wallets"
+        params = {"biz_app_id": "autoclaw"}
+        headers = {
+            "authorization": f"Bearer {account['access_token']}",
+            "content-type": "application/json",
+        }
+        headers.update(get_auth_headers())
+
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            total_balance = data.get("total_balance", 0)
+
+            with pool_lock:
+                account["balance"] = total_balance
+                account["healthy"] = total_balance >= 100
+
+            save_accounts()
+            print(f"[INFO] Updated balance for {account['email']}: {total_balance}")
+            return total_balance
+    except Exception as e:
+        print(f"[ERROR] Failed to refresh balance for {account['email']}: {e}")
+
+    return None
+
+
+def get_fallback_account(exclude_account):
+    """Get next healthy account excluding specified account"""
+    with pool_lock:
+        healthy = [
+            acc for acc in accounts_pool if acc["healthy"] and acc != exclude_account
+        ]
+        if not healthy:
+            return None
+
+        healthy.sort(key=lambda x: x["last_used"])
+        account = healthy[0]
+        account["last_used"] = time.time()
+        return account
+
+    return False
+
+
 # ═══════════════════════════════════════════════════════════
 # BACKGROUND TOKEN REFRESH
 # ═══════════════════════════════════════════════════════════
@@ -247,6 +324,8 @@ def token_refresh_worker():
                     account["refresh_token"] = new_refresh
                     account["healthy"] = True
                     account["fail_count"] = 0
+
+                refresh_account_balance_from_api(account)
                 refreshed += 1
 
         save_accounts()
@@ -335,14 +414,61 @@ def chat_completions():
                     )
 
                     if resp.status_code != 200:
-                        return jsonify(
-                            {
-                                "error": {
-                                    "message": f"Retry failed after token refresh: {resp.text[:200]}",
-                                    "type": "retry_failed",
+                        if resp.status_code == 402:
+                            mark_account_depleted(account)
+
+                            fallback_account = get_fallback_account(account)
+                            if fallback_account:
+                                print(
+                                    f"[INFO] Fallback to {fallback_account['email']} after 402"
+                                )
+
+                                ts = str(int(time.time()))
+                                headers["X-Authorization"] = fallback_account[
+                                    "access_token"
+                                ]
+                                headers["X-Auth-Timestamp"] = ts
+                                headers["X-Auth-Sign"] = generate_sign(ts)
+                                headers["X-Trace-Id"] = str(uuid.uuid4())
+
+                                resp = requests.post(
+                                    f"{PROXY_URL}/chat/completions",
+                                    json=body,
+                                    headers=headers,
+                                    stream=True,
+                                    timeout=60,
+                                )
+
+                                if resp.status_code == 200:
+                                    mark_account_success(fallback_account)
+                                    account = fallback_account
+                                else:
+                                    return jsonify(
+                                        {
+                                            "error": {
+                                                "message": f"Fallback also failed: {resp.text[:200]}",
+                                                "type": "fallback_failed",
+                                            }
+                                        }
+                                    ), resp.status_code
+                            else:
+                                return jsonify(
+                                    {
+                                        "error": {
+                                            "message": "Insufficient balance and no fallback accounts available",
+                                            "type": "no_balance",
+                                        }
+                                    }
+                                ), 402
+                        else:
+                            return jsonify(
+                                {
+                                    "error": {
+                                        "message": f"Retry failed after token refresh: {resp.text[:200]}",
+                                        "type": "retry_failed",
+                                    }
                                 }
-                            }
-                        ), resp.status_code
+                            ), resp.status_code
                 else:
                     return jsonify(
                         {
@@ -355,143 +481,57 @@ def chat_completions():
 
             mark_account_success(account)
 
-            # If client wants non-stream, aggregate response
-            if not data.get("stream", False):
-                full_response = ""
-                tool_calls = []
-                tool_calls_map = {}
-
+            def generate():
+                usage_data = None
+                done_sent = False
                 for line in resp.iter_lines():
                     if line:
-                        line = line.decode("utf-8")
-                        if line.startswith("data: "):
-                            chunk_data = line[6:]
-                            if chunk_data == "[DONE]":
+                        line_str = (
+                            line.decode("utf-8") if isinstance(line, bytes) else line
+                        )
+
+                        if done_sent:
+                            break
+
+                        if not line_str.startswith("data: "):
+                            if line_str == "[DONE]":
+                                yield b"data: [DONE]\n\n"
+                                done_sent = True
                                 break
-                            try:
-                                chunk = json.loads(chunk_data)
-                                delta = chunk["choices"][0].get("delta", {})
-
-                                full_response += delta.get("content", "")
-
-                                if "tool_calls" in delta:
-                                    for tc in delta["tool_calls"]:
-                                        idx = tc.get("index", 0)
-                                        if idx not in tool_calls_map:
-                                            tool_calls_map[idx] = {
-                                                "id": tc.get("id", ""),
-                                                "type": tc.get("type", "function"),
-                                                "function": {
-                                                    "name": tc.get("function", {}).get(
-                                                        "name", ""
-                                                    ),
-                                                    "arguments": "",
-                                                },
-                                            }
-
-                                        if (
-                                            "function" in tc
-                                            and "arguments" in tc["function"]
-                                        ):
-                                            tool_calls_map[idx]["function"][
-                                                "arguments"
-                                            ] += tc["function"]["arguments"]
-
-                                        if "id" in tc and tc["id"]:
-                                            tool_calls_map[idx]["id"] = tc["id"]
-                                        if (
-                                            "function" in tc
-                                            and "name" in tc["function"]
-                                            and tc["function"]["name"]
-                                        ):
-                                            tool_calls_map[idx]["function"]["name"] = (
-                                                tc["function"]["name"]
-                                            )
-                            except:
-                                pass
-
-                if tool_calls_map:
-                    tool_calls = [
-                        tool_calls_map[i] for i in sorted(tool_calls_map.keys())
-                    ]
-
-                message = {
-                    "role": "assistant",
-                    "content": full_response,
-                }
-                if tool_calls:
-                    message["tool_calls"] = tool_calls
-
-                finish_reason = "tool_calls" if tool_calls else "stop"
-
-                return jsonify(
-                    {
-                        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "message": message,
-                                "finish_reason": finish_reason,
-                            }
-                        ],
-                        "usage": {
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "total_tokens": 0,
-                        },
-                    }
-                )
-            else:
-                # Stream response with proper SSE format
-                def generate():
-                    done_sent = False
-                    for line in resp.iter_lines():
-                        if line:
-                            line_str = (
-                                line.decode("utf-8")
-                                if isinstance(line, bytes)
-                                else line
-                            )
-
-                            # Skip if we already sent [DONE]
-                            if done_sent:
-                                break
-
-                            # Check if line is already SSE formatted
-                            if not line_str.startswith("data: "):
-                                # Raw JSON or marker - add SSE prefix
-                                if line_str == "[DONE]":
-                                    yield b"data: [DONE]\n\n"
-                                    done_sent = True
-                                    break
-                                else:
-                                    # Validate it's JSON before sending
-                                    try:
-                                        json.loads(line_str)  # Validate
-                                        yield f"data: {line_str}\n\n".encode("utf-8")
-                                    except json.JSONDecodeError:
-                                        continue  # Skip invalid JSON
                             else:
-                                # Already formatted, check for [DONE]
-                                if "data: [DONE]" in line_str:
-                                    yield line + b"\n\n"
-                                    done_sent = True
-                                    break
-                                else:
-                                    yield line + b"\n\n"
+                                try:
+                                    json.loads(line_str)
+                                    yield f"data: {line_str}\n\n".encode("utf-8")
+                                except json.JSONDecodeError:
+                                    continue
+                        else:
+                            if "data: [DONE]" in line_str:
+                                yield line + b"\n\n"
+                                done_sent = True
+                                break
+                            else:
+                                try:
+                                    chunk_data = line_str[6:]
+                                    chunk = json.loads(chunk_data)
 
-                    # Ensure we always send [DONE] at the end
-                    if not done_sent:
-                        yield b"data: [DONE]\n\n"
+                                    if "usage" in chunk:
+                                        usage_data = chunk["usage"]
 
-                return Response(
-                    stream_with_context(generate()),
-                    content_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                )
+                                    yield line + b"\n\n"
+                                except json.JSONDecodeError:
+                                    continue
+
+                if not done_sent:
+                    yield b"data: [DONE]\n\n"
+
+                if usage_data:
+                    update_account_balance(account, usage_data)
+
+            return Response(
+                stream_with_context(generate()),
+                content_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
         except Exception as e:
             mark_account_failed(account)
