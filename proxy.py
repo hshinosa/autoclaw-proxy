@@ -104,14 +104,16 @@ def load_accounts():
         with pool_lock:
             accounts_pool = []
             for acc in raw_accounts:
+                balance = acc.get("balance", 0)
+                healthy = acc.get("healthy", balance >= 100)
                 accounts_pool.append(
                     {
                         "email": acc["email"],
                         "device_id": acc["device_id"],
                         "access_token": acc["access_token"],
                         "refresh_token": acc["refresh_token"],
-                        "balance": acc.get("balance", 0),
-                        "healthy": True,
+                        "balance": balance,
+                        "healthy": healthy,
                         "last_used": 0,
                         "fail_count": 0,
                     }
@@ -136,6 +138,7 @@ def save_accounts():
                     "access_token": acc["access_token"],
                     "refresh_token": acc["refresh_token"],
                     "balance": acc["balance"],
+                    "healthy": acc.get("healthy", True),
                 }
             )
 
