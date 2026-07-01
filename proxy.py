@@ -319,24 +319,39 @@ def chat_completions():
 
             if resp.status_code != 200:
                 mark_account_failed(account)
-                # Try token refresh
                 if refresh_account_token(account):
+                    ts = str(int(time.time()))
+                    headers["X-Authorization"] = account["access_token"]
+                    headers["X-Auth-Timestamp"] = ts
+                    headers["X-Auth-Sign"] = generate_sign(ts)
+                    headers["X-Trace-Id"] = str(uuid.uuid4())
+
+                    resp = requests.post(
+                        f"{PROXY_URL}/chat/completions",
+                        json=body,
+                        headers=headers,
+                        stream=True,
+                        timeout=60,
+                    )
+
+                    if resp.status_code != 200:
+                        return jsonify(
+                            {
+                                "error": {
+                                    "message": f"Retry failed after token refresh: {resp.text[:200]}",
+                                    "type": "retry_failed",
+                                }
+                            }
+                        ), resp.status_code
+                else:
                     return jsonify(
                         {
                             "error": {
-                                "message": "Token refreshed, please retry",
-                                "type": "token_expired",
+                                "message": f"Upstream error: {resp.text[:200]}",
+                                "type": "upstream_error",
                             }
                         }
-                    ), 401
-                return jsonify(
-                    {
-                        "error": {
-                            "message": f"Upstream error: {resp.text[:200]}",
-                            "type": "upstream_error",
-                        }
-                    }
-                ), resp.status_code
+                    ), resp.status_code
 
             mark_account_success(account)
 
