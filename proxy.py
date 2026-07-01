@@ -262,7 +262,7 @@ def refresh_account_balance_from_api(account):
         url = f"{BASE_URL}/agent-assetmgr/api/v2/wallets"
         params = {"biz_app_id": "autoclaw"}
         headers = {
-            "authorization": f"Bearer {account['access_token']}",
+            "authorization": account["access_token"],
             "content-type": "application/json",
         }
         headers.update(get_auth_headers())
