@@ -273,15 +273,16 @@ def refresh_account_balance_from_api(account):
         resp = requests.get(url, params=params, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            total_balance = data.get("total_balance", 0)
+            if data.get("code") == 0:
+                total_balance = data.get("data", {}).get("total_balance", 0)
 
-            with pool_lock:
-                account["balance"] = total_balance
-                account["healthy"] = total_balance >= 100
+                with pool_lock:
+                    account["balance"] = total_balance
+                    account["healthy"] = total_balance >= 100
 
-            save_accounts()
-            print(f"[INFO] Updated balance for {account['email']}: {total_balance}")
-            return total_balance
+                save_accounts()
+                print(f"[INFO] Updated balance for {account['email']}: {total_balance}")
+                return total_balance
     except Exception as e:
         print(f"[ERROR] Failed to refresh balance for {account['email']}: {e}")
 
